@@ -1,14 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
-import {
-  readFileSync,
-  readdirSync,
-  mkdtempSync,
-  unlinkSync,
-  rmdirSync,
-} from 'node:fs';
-import { join } from 'node:path';
+import { database } from './database';
+import type { Database } from '../db/database';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join, resolve, dirname, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { generateKeyPair, exportJWK, createLocalJWKSet, SignJWT } from 'jose';
 import {
@@ -25,52 +20,6 @@ import {
   weekLabel,
   type Report,
 } from '../lib/reports';
-function database(path = ':memory:', migrate = true) {
-  const sql = new DatabaseSync(path);
-  sql.exec('PRAGMA foreign_keys=ON');
-  if (migrate)
-    for (const file of readdirSync('drizzle')
-      .filter((f) => f.endsWith('.sql'))
-      .sort())
-      sql.exec(readFileSync(join('drizzle', file), 'utf8'));
-  function statement(query: string, bindings: unknown[] = []): unknown {
-    const prep = () => sql.prepare(query),
-      args = () =>
-        bindings.map((v) => (v === undefined ? null : v)) as (
-          | string
-          | number
-          | null
-        )[];
-    return {
-      bind: (...values: unknown[]) => statement(query, values),
-      first: async (column?: string) => {
-        const row = prep().get(...args());
-        return row ? (column ? row[column] : row) : null;
-      },
-      all: async () => ({ success: true, results: prep().all(...args()) }),
-      run: async () => {
-        const result = prep().run(...args());
-        return { success: true, meta: { changes: Number(result.changes) } };
-      },
-    };
-  }
-  const db = {
-    prepare: statement,
-    batch: async (statements: { run: () => Promise<unknown> }[]) => {
-      sql.exec('BEGIN');
-      try {
-        const results = [];
-        for (const s of statements) results.push(await s.run());
-        sql.exec('COMMIT');
-        return results;
-      } catch (e) {
-        sql.exec('ROLLBACK');
-        throw e;
-      }
-    },
-  } as unknown as D1Database;
-  return { db, sql };
-}
 const admin: GoogleIdentity = {
   sub: 'google-admin',
   email: 'owner@gmail.com',
@@ -88,7 +37,7 @@ const bob: GoogleIdentity = {
 };
 const origin = 'https://reports.example.com';
 type Session = { cookie: string; csrfToken: string };
-function runtime(db: D1Database): Runtime {
+function runtime(db: Database): Runtime & { DB: Database } {
   return {
     DB: db,
     GOOGLE_CLIENT_ID: 'client.apps.googleusercontent.com',
@@ -161,7 +110,7 @@ async function authorize(env: Runtime, identity: GoogleIdentity) {
   const auth = (await me.json()) as { csrfToken: string };
   return { cookie, csrfToken: auth.csrfToken };
 }
-async function team(db: D1Database) {
+async function team(db: Database) {
   const env = runtime(db),
     owner = await authorize(env, admin);
   assert.equal(
@@ -202,9 +151,14 @@ async function create(
   return ((await response.json()) as { report: Report }).report;
 }
 test('fails closed without config and rejects anonymous access', async () => {
-  const { db, sql } = database();
+  const { db, sql } = await database();
   try {
     assert.equal(configured({ ...runtime(db), GOOGLE_CLIENT_ID: '' }), false);
+    assert.equal(configured({ ...runtime(db), DB: undefined }), false);
+    assert.equal(
+      (await call({ ...runtime(db), DB: undefined }, 'reports')).status,
+      503,
+    );
     assert.equal(
       (await call({ ...runtime(db), ADMIN_EMAIL: '' }, 'auth/challenge'))
         .status,
@@ -216,11 +170,11 @@ test('fails closed without config and rejects anonymous access', async () => {
       401,
     );
   } finally {
-    sql.close();
+    await sql.close();
   }
 });
 test('Google allowlist, administrator bootstrap, secure cookie and session logout', async () => {
-  const { db, sql } = database();
+  const { db, sql } = await database();
   try {
     const env = runtime(db);
     assert.equal((await login(env, alice)).status, 403);
@@ -243,11 +197,11 @@ test('Google allowlist, administrator bootstrap, secure cookie and session logou
       401,
     );
   } finally {
-    sql.close();
+    await sql.close();
   }
 });
 test('login requires matching CSRF, allowed origin, one-use unexpired challenge and Google verification', async () => {
-  const { db, sql } = database();
+  const { db, sql } = await database();
   try {
     const env = runtime(db),
       challenge = await call(env, 'auth/challenge'),
@@ -287,7 +241,7 @@ test('login requires matching CSRF, allowed origin, one-use unexpired challenge 
     );
     const another = await call(env, 'auth/challenge'),
       body = (await another.json()) as { csrfToken: string };
-    sql.exec('UPDATE login_challenges SET expires_at=0');
+    await sql.exec('UPDATE weekly_report.login_challenges SET expires_at=0');
     const expired = new Request(origin + '/api/auth/google', {
       method: 'POST',
       headers: {
@@ -302,11 +256,11 @@ test('login requires matching CSRF, allowed origin, one-use unexpired challenge 
       401,
     );
   } finally {
-    sql.close();
+    await sql.close();
   }
 });
 test('drafts never leak via team lists, counts, authors or direct links, including to admin', async () => {
-  const { db, sql } = database();
+  const { db, sql } = await database();
   try {
     const { env, owner, a, b } = await team(db),
       r = await create(env, a);
@@ -329,11 +283,11 @@ test('drafts never leak via team lists, counts, authors or direct links, includi
     const mine = await call(env, 'reports?scope=mine', 'GET', undefined, a);
     assert.equal(((await mine.json()) as { total: number }).total, 1);
   } finally {
-    sql.close();
+    await sql.close();
   }
 });
 test('submission exposes saved content, other users cannot edit, owner can revise without losing submission', async () => {
-  const { db, sql } = database();
+  const { db, sql } = await database();
   try {
     const { env, a, b, owner } = await team(db),
       r = await create(env, a);
@@ -390,11 +344,11 @@ test('submission exposes saved content, other users cannot edit, owner can revis
       400,
     );
   } finally {
-    sql.close();
+    await sql.close();
   }
 });
 test('one report per person/week, duplicate sends are idempotent, weeks and authors remain independent', async () => {
-  const { db, sql } = database();
+  const { db, sql } = await database();
   try {
     const { env, a, b } = await team(db),
       input = draft(),
@@ -421,11 +375,11 @@ test('one report per person/week, duplicate sends are idempotent, weeks and auth
       201,
     );
   } finally {
-    sql.close();
+    await sql.close();
   }
 });
 test('concurrent different edits accept one and reject stale overwrite; exact retried save is idempotent', async () => {
-  const { db, sql } = database();
+  const { db, sql } = await database();
   try {
     const { env, a } = await team(db),
       r = await create(env, a);
@@ -449,11 +403,11 @@ test('concurrent different edits accept one and reject stale overwrite; exact re
       2,
     );
   } finally {
-    sql.close();
+    await sql.close();
   }
 });
 test('membership removal invalidates every existing session, keeps reports and restored access does not revive old sessions', async () => {
-  const { db, sql } = database();
+  const { db, sql } = await database();
   try {
     const { env, a, owner, b } = await team(db),
       a2 = await authorize(env, alice),
@@ -481,11 +435,11 @@ test('membership removal invalidates every existing session, keeps reports and r
     assert.equal((await call(env, 'reports', 'GET', undefined, a)).status, 401);
     assert.equal((await login(env, alice)).status, 200);
   } finally {
-    sql.close();
+    await sql.close();
   }
 });
 test('only administrator manages members and administrator cannot be removed', async () => {
-  const { db, sql } = database();
+  const { db, sql } = await database();
   try {
     const { env, a, owner } = await team(db);
     for (const [method, data] of [
@@ -516,11 +470,11 @@ test('only administrator manages members and administrator cannot be removed', a
       400,
     );
   } finally {
-    sql.close();
+    await sql.close();
   }
 });
 test('server rejects forged ownership, CSRF, invalid weeks, blank submission and oversized content', async () => {
-  const { db, sql } = database();
+  const { db, sql } = await database();
   try {
     const { env, a } = await team(db);
     assert.equal(
@@ -590,11 +544,11 @@ test('server rejects forged ownership, CSRF, invalid weeks, blank submission and
     const r = await create(env, a, draft({ authorId: admin.sub }));
     assert.equal(r.authorId, alice.sub);
   } finally {
-    sql.close();
+    await sql.close();
   }
 });
 test('archive filters sort by week, paginate and do not include drafts', async () => {
-  const { db, sql } = database();
+  const { db, sql } = await database();
   try {
     const { env, a, b } = await team(db);
     for (let n = 0; n < 22; n++) {
@@ -638,18 +592,18 @@ test('archive filters sort by week, paginate and do not include drafts', async (
     );
     assert.equal(((await injection.json()) as { total: number }).total, 0);
   } finally {
-    sql.close();
+    await sql.close();
   }
 });
 test('records and sessions survive closing and reopening the database', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'weekly-report-test-')),
-    path = join(dir, 'persistence.sqlite');
-  let opened = database(path);
+    path = join(dir, 'postgres');
+  let opened = await database(path);
   try {
     const { env, a } = await team(opened.db),
       r = await create(env, a);
-    opened.sql.close();
-    opened = database(path, false);
+    await opened.sql.close();
+    opened = await database(path, false);
     const restored = await call(
       runtime(opened.db),
       'reports/' + r.id,
@@ -663,22 +617,25 @@ test('records and sessions survive closing and reopening the database', async ()
       r.completed,
     );
   } finally {
-    opened.sql.close();
-    unlinkSync(path);
-    rmdirSync(dir);
+    await opened.sql.close();
+    assert.equal(dirname(resolve(dir)), resolve(tmpdir()));
+    assert.ok(basename(dir).startsWith('weekly-report-test-'));
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 test('expired sessions are rejected', async () => {
-  const { db, sql } = database();
+  const { db, sql } = await database();
   try {
     const { env, a } = await team(db);
     await db
-      .prepare('UPDATE sessions SET expires_at=0 WHERE token_hash=?')
+      .prepare(
+        'UPDATE weekly_report.sessions SET expires_at=0 WHERE token_hash=$1',
+      )
       .bind(await hash(a.cookie.split('=')[1]))
       .run();
     assert.equal((await call(env, 'reports', 'GET', undefined, a)).status, 401);
   } finally {
-    sql.close();
+    await sql.close();
   }
 });
 test('Thai timezone week boundaries and year crossing', () => {

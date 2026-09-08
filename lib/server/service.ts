@@ -7,8 +7,9 @@ import {
   type Member,
 } from '../reports';
 import { verifyGoogle, type GoogleIdentity } from './google';
+import type { Database } from '../../db/database';
 export type Runtime = {
-  DB: D1Database;
+  DB?: Database;
   GOOGLE_CLIENT_ID?: string;
   ADMIN_EMAIL?: string;
   APP_ORIGIN?: string;
@@ -38,10 +39,11 @@ function fail(
 }
 const now = () => new Date().toISOString();
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-export function configured(env: Runtime): boolean {
+export function configured(env: Runtime): env is Runtime & { DB: Database } {
   try {
     const u = new URL(env.APP_ORIGIN || '');
     return Boolean(
+      env.DB &&
       env.GOOGLE_CLIENT_ID?.endsWith('.apps.googleusercontent.com') &&
       env.ADMIN_EMAIL &&
       emailPattern.test(env.ADMIN_EMAIL) &&
@@ -54,7 +56,9 @@ export function configured(env: Runtime): boolean {
     return false;
   }
 }
-function requireConfig(env: Runtime) {
+function requireConfig(
+  env: Runtime,
+): asserts env is Runtime & { DB: Database } {
   if (!configured(env))
     fail(503, 'ยังไม่พร้อมเข้าสู่ระบบ กรุณาติดต่อผู้ดูแล', 'setup_required');
 }
@@ -110,7 +114,7 @@ export async function session(
   const raw = parseCookie(request, 'wr_session');
   if (!/^[a-f0-9]{64}$/.test(raw)) return null;
   const row = await env.DB.prepare(
-    `SELECT u.id,u.email,u.name,m.role,s.csrf_token AS csrfToken FROM sessions s JOIN users u ON u.id=s.user_id JOIN members m ON m.user_id=u.id WHERE s.token_hash=? AND s.expires_at>? AND m.active=1`,
+    'SELECT u.id,u.email,u.name,m.role,s.csrf_token AS "csrfToken" FROM weekly_report.sessions s JOIN weekly_report.users u ON u.id=s.user_id JOIN weekly_report.members m ON m.user_id=u.id WHERE s.token_hash=$1 AND s.expires_at>$2 AND m.active=1',
   )
     .bind(await hash(raw), Date.now())
     .first<User & { csrfToken: string }>();
@@ -177,10 +181,16 @@ function canonicalWeek(value: unknown): string {
     return fail(400, 'กรุณาเลือกสัปดาห์ที่ถูกต้อง', 'validation');
   }
 }
-const selectReport = `SELECT r.id,r.author_id AS authorId,u.name AS authorName,u.email AS authorEmail,r.week_start AS weekStart,r.completed,r.in_progress AS inProgress,r.blockers,r.next_week AS nextWeek,r.status,r.version,r.created_at AS createdAt,r.updated_at AS updatedAt,r.submitted_at AS submittedAt FROM reports r JOIN users u ON u.id=r.author_id`;
-async function reportById(env: Runtime, id: string, user: User) {
+const selectReport =
+  'SELECT r.id,r.author_id AS "authorId",u.name AS "authorName",u.email AS "authorEmail",r.week_start::text AS "weekStart",r.completed,r.in_progress AS "inProgress",r.blockers,r.next_week AS "nextWeek",r.status,r.version,r.created_at AS "createdAt",r.updated_at AS "updatedAt",r.submitted_at AS "submittedAt" FROM weekly_report.reports r JOIN weekly_report.users u ON u.id=r.author_id';
+async function reportById(
+  env: Runtime & { DB: Database },
+  id: string,
+  user: User,
+) {
   const row = await env.DB.prepare(
-    selectReport + " WHERE r.id=? AND (r.status='submitted' OR r.author_id=?)",
+    selectReport +
+      " WHERE r.id=$1 AND (r.status='submitted' OR r.author_id=$2)",
   )
     .bind(id, user.id)
     .first<Report>();
@@ -195,7 +205,7 @@ function sameContent(report: Report, c: ReportContent, status: string) {
 }
 async function writeReport(
   request: Request,
-  env: Runtime,
+  env: Runtime & { DB: Database },
   user: User,
   id?: string,
   submit = false,
@@ -214,7 +224,7 @@ async function writeReport(
     if (typeof reportId !== 'string' || !/^[a-f0-9-]{36}$/.test(reportId))
       fail(400, 'รหัสรายงานไม่ถูกต้อง');
     const inserted = await env.DB.prepare(
-      `INSERT INTO reports (id,author_id,week_start,completed,in_progress,blockers,next_week,status,version,created_at,updated_at,submitted_at) SELECT ?,?,?,?,?,?,?,?,1,?,?,? WHERE EXISTS(SELECT 1 FROM members WHERE user_id=? AND active=1) ON CONFLICT DO NOTHING RETURNING id`,
+      'INSERT INTO weekly_report.reports (id,author_id,week_start,completed,in_progress,blockers,next_week,status,version,created_at,updated_at,submitted_at) SELECT $1,$2,$3,$4,$5,$6,$7,$8,1,$9,$10,$11 WHERE EXISTS(SELECT 1 FROM weekly_report.members WHERE user_id=$12 AND active=1) ON CONFLICT DO NOTHING RETURNING id',
     )
       .bind(
         reportId,
@@ -234,7 +244,7 @@ async function writeReport(
     if (inserted)
       return json({ report: await reportById(env, inserted.id, user) }, 201);
     const existing = await env.DB.prepare(
-      selectReport + ' WHERE r.author_id=? AND r.week_start=?',
+      selectReport + ' WHERE r.author_id=$1 AND r.week_start=$2',
     )
       .bind(user.id, week)
       .first<Report>();
@@ -269,7 +279,7 @@ async function writeReport(
     );
   }
   const updated = await env.DB.prepare(
-    `UPDATE reports SET completed=?,in_progress=?,blockers=?,next_week=?,status=?,version=version+1,updated_at=?,submitted_at=COALESCE(submitted_at,?) WHERE id=? AND author_id=? AND version=? AND EXISTS(SELECT 1 FROM members WHERE user_id=? AND active=1) RETURNING id`,
+    'UPDATE weekly_report.reports SET completed=$1,in_progress=$2,blockers=$3,next_week=$4,status=$5,version=version+1,updated_at=$6,submitted_at=COALESCE(submitted_at,$7) WHERE id=$8 AND author_id=$9 AND version=$10 AND EXISTS(SELECT 1 FROM weekly_report.members WHERE user_id=$11 AND active=1) RETURNING id',
   )
     .bind(
       c.completed,
@@ -306,11 +316,11 @@ export async function handleApi(
         nonce = token(),
         expires = Date.now() + 10 * 60 * 1000;
       await env.DB.batch([
-        env.DB.prepare('DELETE FROM login_challenges WHERE expires_at<?').bind(
-          Date.now(),
-        ),
         env.DB.prepare(
-          'INSERT INTO login_challenges (token_hash,nonce,expires_at) VALUES (?,?,?)',
+          'DELETE FROM weekly_report.login_challenges WHERE expires_at<$1',
+        ).bind(Date.now()),
+        env.DB.prepare(
+          'INSERT INTO weekly_report.login_challenges (token_hash,nonce,expires_at) VALUES ($1,$2,$3)',
         ).bind(await hash(raw), nonce, expires),
       ]);
       return json(
@@ -331,7 +341,7 @@ export async function handleApi(
       )
         fail(403, 'การเข้าสู่ระบบหมดอายุ กรุณาลองใหม่', 'csrf');
       const challenge = await env.DB.prepare(
-        'DELETE FROM login_challenges WHERE token_hash=? AND expires_at>? RETURNING nonce',
+        'DELETE FROM weekly_report.login_challenges WHERE token_hash=$1 AND expires_at>$2 RETURNING nonce',
       )
         .bind(await hash(raw), Date.now())
         .first<{ nonce: string }>();
@@ -353,13 +363,13 @@ export async function handleApi(
       const email = identity.email.toLowerCase();
       if (email === env.ADMIN_EMAIL!.trim().toLowerCase()) {
         await env.DB.prepare(
-          `INSERT INTO members (id,email,role,active,created_at) VALUES (?,?,'admin',1,?) ON CONFLICT(email) DO NOTHING`,
+          "INSERT INTO weekly_report.members (id,email,role,active,created_at) VALUES ($1,$2,'admin',1,$3) ON CONFLICT(email) DO NOTHING",
         )
           .bind(crypto.randomUUID(), email, now())
           .run();
       }
       const member = await env.DB.prepare(
-        'SELECT id,email,user_id AS userId,role,active FROM members WHERE user_id=? OR email=? ORDER BY CASE WHEN user_id=? THEN 0 ELSE 1 END LIMIT 1',
+        'SELECT id,email,user_id AS "userId",role,active FROM weekly_report.members WHERE user_id=$1 OR email=$2 ORDER BY CASE WHEN user_id=$3 THEN 0 ELSE 1 END LIMIT 1',
       )
         .bind(identity.sub, email, identity.sub)
         .first<Member>();
@@ -373,13 +383,13 @@ export async function handleApi(
         csrfToken = token();
       await env.DB.batch([
         env.DB.prepare(
-          'INSERT INTO users (id,email,name,created_at) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,name=excluded.name',
+          'INSERT INTO weekly_report.users (id,email,name,created_at) VALUES ($1,$2,$3,$4) ON CONFLICT(id) DO UPDATE SET email=excluded.email,name=excluded.name',
         ).bind(identity.sub, email, identity.name, now()),
         env.DB.prepare(
-          'UPDATE members SET user_id=? WHERE id=? AND active=1 AND (user_id IS NULL OR user_id=?)',
+          'UPDATE weekly_report.members SET user_id=$1 WHERE id=$2 AND active=1 AND (user_id IS NULL OR user_id=$3)',
         ).bind(identity.sub, member.id, identity.sub),
         env.DB.prepare(
-          'INSERT INTO sessions (token_hash,user_id,csrf_token,expires_at) SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM members WHERE id=? AND active=1 AND user_id=?)',
+          'INSERT INTO weekly_report.sessions (token_hash,user_id,csrf_token,expires_at) SELECT $1,$2,$3,$4 WHERE EXISTS(SELECT 1 FROM weekly_report.members WHERE id=$5 AND active=1 AND user_id=$6)',
         ).bind(
           await hash(sessionToken),
           identity.sub,
@@ -388,9 +398,9 @@ export async function handleApi(
           member.id,
           identity.sub,
         ),
-        env.DB.prepare('DELETE FROM sessions WHERE expires_at<?').bind(
-          Date.now(),
-        ),
+        env.DB.prepare(
+          'DELETE FROM weekly_report.sessions WHERE expires_at<$1',
+        ).bind(Date.now()),
       ]);
       const response = json({ ok: true }, 200, {
         'Set-Cookie': cookie('wr_session', sessionToken, 7 * 86400, env),
@@ -408,7 +418,9 @@ export async function handleApi(
     const user = auth.user;
     if (path === 'auth/session' && method === 'GET') return json(auth);
     if (path === 'auth/logout' && method === 'POST') {
-      await env.DB.prepare('DELETE FROM sessions WHERE token_hash=?')
+      await env.DB.prepare(
+        'DELETE FROM weekly_report.sessions WHERE token_hash=$1',
+      )
         .bind(await hash(parseCookie(request, 'wr_session')))
         .run();
       return json({ ok: true }, 200, {
@@ -417,7 +429,7 @@ export async function handleApi(
     }
     if (path === 'authors' && method === 'GET') {
       const rows = await env.DB.prepare(
-        `SELECT u.id,u.name FROM users u WHERE EXISTS(SELECT 1 FROM reports r WHERE r.author_id=u.id AND r.status='submitted') ORDER BY u.name,u.id`,
+        "SELECT u.id,u.name FROM weekly_report.users u WHERE EXISTS(SELECT 1 FROM weekly_report.reports r WHERE r.author_id=u.id AND r.status='submitted') ORDER BY u.name,u.id",
       ).all();
       return json({ authors: rows.results });
     }
@@ -425,15 +437,15 @@ export async function handleApi(
       const scope = url.searchParams.get('scope') || 'team';
       if (!['team', 'mine'].includes(scope)) fail(400, 'ตัวกรองไม่ถูกต้อง');
       const clauses = [
-          scope === 'mine' ? 'r.author_id=?' : "r.status='submitted'",
+          scope === 'mine' ? 'r.author_id=$1' : "r.status='submitted'",
         ],
         values: unknown[] = scope === 'mine' ? [user.id] : [];
       if (url.searchParams.get('week')) {
-        clauses.push('r.week_start=?');
+        clauses.push('r.week_start=$' + (values.length + 1));
         values.push(canonicalWeek(url.searchParams.get('week')));
       }
       if (url.searchParams.get('author')) {
-        clauses.push('r.author_id=?');
+        clauses.push('r.author_id=$' + (values.length + 1));
         values.push(url.searchParams.get('author'));
       }
       const page = Number(url.searchParams.get('page') || 1);
@@ -443,18 +455,19 @@ export async function handleApi(
       const results = await env.DB.prepare(
         selectReport +
           where +
-          ' ORDER BY r.week_start DESC,r.updated_at DESC,r.id LIMIT 20 OFFSET ?',
+          ' ORDER BY r.week_start DESC,r.updated_at DESC,r.id LIMIT 20 OFFSET $' +
+          (values.length + 1),
       )
         .bind(...values, (page - 1) * 20)
         .all<Report>();
       const count = await env.DB.prepare(
-        'SELECT COUNT(*) AS count FROM reports r' + where,
+        'SELECT COUNT(*) AS count FROM weekly_report.reports r' + where,
       )
         .bind(...values)
         .first<{ count: number }>();
       return json({
         reports: results.results,
-        total: count?.count || 0,
+        total: Number(count?.count || 0),
         page,
         pageSize: 20,
       });
@@ -476,7 +489,7 @@ export async function handleApi(
         fail(403, 'เฉพาะผู้ดูแลจัดการสมาชิกได้', 'forbidden');
       if (path === 'members' && method === 'GET') {
         const result = await env.DB.prepare(
-          'SELECT m.id,m.email,m.user_id AS userId,u.name,m.role,m.active,m.created_at AS createdAt FROM members m LEFT JOIN users u ON u.id=m.user_id ORDER BY m.active DESC,m.role,m.email',
+          'SELECT m.id,m.email,m.user_id AS "userId",u.name,m.role,m.active,m.created_at AS "createdAt" FROM weekly_report.members m LEFT JOIN weekly_report.users u ON u.id=m.user_id ORDER BY m.active DESC,m.role,m.email',
         ).all<Member>();
         return json({ members: result.results });
       }
@@ -489,7 +502,7 @@ export async function handleApi(
         if (!emailPattern.test(email) || email.length > 254)
           fail(400, 'กรุณากรอกอีเมลที่ถูกต้อง');
         await env.DB.prepare(
-          `INSERT INTO members (id,email,role,active,created_at) VALUES (?,?,'member',1,?) ON CONFLICT(email) DO UPDATE SET active=1`,
+          "INSERT INTO weekly_report.members (id,email,role,active,created_at) VALUES ($1,$2,'member',1,$3) ON CONFLICT(email) DO UPDATE SET active=1",
         )
           .bind(crypto.randomUUID(), email, now())
           .run();
@@ -498,19 +511,19 @@ export async function handleApi(
       if (method === 'DELETE' && /^members\/[^/]+$/.test(path)) {
         const memberId = decodeURIComponent(path.split('/')[1]);
         const target = await env.DB.prepare(
-          'SELECT id,role,user_id AS userId FROM members WHERE id=?',
+          'SELECT id,role,user_id AS "userId" FROM weekly_report.members WHERE id=$1',
         )
           .bind(memberId)
           .first<Member>();
         if (!target) fail(404, 'ไม่พบสมาชิก');
         if (target.role === 'admin') fail(400, 'ไม่สามารถนำผู้ดูแลออกจากทีม');
         await env.DB.batch([
-          env.DB.prepare('UPDATE members SET active=0 WHERE id=?').bind(
-            memberId,
-          ),
-          env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(
-            target.userId,
-          ),
+          env.DB.prepare(
+            'UPDATE weekly_report.members SET active=0 WHERE id=$1',
+          ).bind(memberId),
+          env.DB.prepare(
+            'DELETE FROM weekly_report.sessions WHERE user_id=$1',
+          ).bind(target.userId),
         ]);
         return json({ ok: true });
       }
