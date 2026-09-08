@@ -8,8 +8,11 @@ import {
 } from '../reports';
 import { verifyGoogle, type GoogleIdentity } from './google';
 import type { Database } from '../../db/database';
+import { configurationIssues, normalizeSettings } from './config';
+import { databaseSetupError } from './database-errors';
 export type Runtime = {
   DB?: Database;
+  databaseInvalid?: boolean;
   GOOGLE_CLIENT_ID?: string;
   ADMIN_EMAIL?: string;
   APP_ORIGIN?: string;
@@ -40,21 +43,9 @@ function fail(
 const now = () => new Date().toISOString();
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export function configured(env: Runtime): env is Runtime & { DB: Database } {
-  try {
-    const u = new URL(env.APP_ORIGIN || '');
-    return Boolean(
-      env.DB &&
-      env.GOOGLE_CLIENT_ID?.endsWith('.apps.googleusercontent.com') &&
-      env.ADMIN_EMAIL &&
-      emailPattern.test(env.ADMIN_EMAIL) &&
-      (u.protocol === 'https:' ||
-        (u.protocol === 'http:' &&
-          ['localhost', '127.0.0.1'].includes(u.hostname))) &&
-      u.origin === env.APP_ORIGIN,
-    );
-  } catch {
-    return false;
-  }
+  return (
+    configurationIssues({ ...env, ...normalizeSettings(env) }).length === 0
+  );
 }
 function requireConfig(
   env: Runtime,
@@ -110,6 +101,7 @@ export async function session(
   request: Request,
   env: Runtime,
 ): Promise<{ user: User; csrfToken: string } | null> {
+  env = { ...env, ...normalizeSettings(env) };
   if (!configured(env)) return null;
   const raw = parseCookie(request, 'wr_session');
   if (!/^[a-f0-9]{64}$/.test(raw)) return null;
@@ -304,12 +296,13 @@ export async function handleApi(
   env: Runtime,
   verify: Verify = verifyGoogle,
 ): Promise<Response> {
+  env = { ...env, ...normalizeSettings(env) };
   try {
     const url = new URL(request.url),
       path = url.pathname.replace(/^\/api\//, '').replace(/\/$/, ''),
       method = request.method;
     if (path === 'auth/config' && method === 'GET')
-      return json({ ready: configured(env) });
+      return json({ ready: configured(env), issues: configurationIssues(env) });
     requireConfig(env);
     if (path === 'auth/challenge' && method === 'GET') {
       const raw = token(),
@@ -539,6 +532,10 @@ export async function handleApi(
       'Weekly Report request failed',
       error instanceof Error ? error.message : 'Unknown error',
     );
+    if (
+      new URL(request.url).pathname.replace(/\/$/, '') === '/api/auth/challenge'
+    )
+      return json(databaseSetupError(error), 503);
     return json(
       {
         error: 'เกิดข้อผิดพลาด กรุณาลองอีกครั้ง ข้อความที่กรอกยังอยู่',

@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { sections } from '@/lib/reports';
+import type { SetupIssue } from '@/lib/server/config';
 type GoogleWindow = Window & {
   google?: {
     accounts: {
@@ -21,7 +22,13 @@ type GoogleWindow = Window & {
     };
   };
 };
-export function Login({ ready }: { ready: boolean }) {
+export function Login({
+  ready,
+  setupIssues = [],
+}: {
+  ready: boolean;
+  setupIssues?: SetupIssue[];
+}) {
   const mount = useRef<HTMLDivElement>(null),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false),
@@ -146,9 +153,26 @@ export function Login({ ready }: { ready: boolean }) {
                   <span>
                     ยังไม่เปิดใช้งานการเข้าสู่ระบบ
                     <br />
-                    <span className="muted">กรุณาติดต่อผู้ดูแลทีมเพื่อตั้งค่าครั้งแรก</span>
+                    <span className="muted">
+                      ผู้ดูแลตรวจการตั้งค่าของ deployment นี้ได้จากรายการด้านล่าง
+                    </span>
                   </span>
                 </p>
+                {setupIssues.length > 0 && (
+                  <div className="mt-3 text-sm" role="status">
+                    <ul className="space-y-2">
+                      {setupIssues.map((issue) => (
+                        <li key={issue.key}>
+                          <strong>{issue.key}</strong>: {issue.message}
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="muted mt-3">
+                      หลังแก้ env บน Vercel ให้เลือก Production แล้ว Redeploy
+                      เพื่อใช้ค่าใหม่
+                    </p>
+                  </div>
+                )}
               </>
             )}
             {error && (

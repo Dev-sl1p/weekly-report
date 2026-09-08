@@ -80,6 +80,13 @@ Preview ที่ยังไม่ตั้ง environment จะเปิด�
 
 อ้างอิง: [Next.js on Vercel](https://vercel.com/docs/frameworks/full-stack/nextjs)
 
+### ตั้ง env แล้วแต่ยังเข้าสู่ระบบไม่ได้
+
+- เปิด `/api/auth/config` บนโดเมนที่ใช้งานจริง: `ready` บอกว่าค่าตั้งต้นครบหรือไม่ และ `issues` ระบุเฉพาะชื่อตัวแปรกับปัญหาโดยไม่แสดงค่า secret
+- ระบบตัดช่องว่างหัวท้าย และรองรับ `APP_ORIGIN` ที่มี `/` ท้าย URL แต่ไม่รับ path เช่น `/login`, query หรือ URL ที่มี username/password
+- บน Vercel ต้องเลือก environment ให้ตรงกับ deployment และ Redeploy หลังเปลี่ยน env จากนั้นเปิด `/login` ใหม่บน production domain
+- `ready: true` ยังไม่ใช่การยืนยันว่าเชื่อมฐานข้อมูลสำเร็จ เมื่อเปิดหน้า login จะเรียก `/api/auth/challenge` หากล้มเหลว หน้าเว็บจะแยกข้อความสำหรับ migration, สิทธิ์, รหัสผ่าน, TLS certificate หรือการเชื่อมต่อ ตรวจรายละเอียดเพิ่มเติมใน Vercel Logs ของคำขอนี้
+
 ## สิทธิ์และข้อมูล
 
 - หนึ่งรายงานต่อคนต่อสัปดาห์ จันทร์–อาทิตย์ เขตเวลา Asia/Bangkok เขียนย้อนหลังได้

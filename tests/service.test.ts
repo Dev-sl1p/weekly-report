@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { database } from './database';
-import type { Database } from '../db/database';
+import { Database } from '../db/database';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join, resolve, dirname, basename } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -155,6 +155,20 @@ test('fails closed without config and rejects anonymous access', async () => {
   try {
     assert.equal(configured({ ...runtime(db), GOOGLE_CLIENT_ID: '' }), false);
     assert.equal(configured({ ...runtime(db), DB: undefined }), false);
+    const diagnostics = await call(
+      { ...runtime(db), DB: undefined },
+      'auth/config',
+    );
+    const diagnosticsBody = (await diagnostics.json()) as {
+      ready: boolean;
+      issues: { key: string }[];
+    };
+    assert.equal(diagnosticsBody.ready, false);
+    assert.deepEqual(
+      diagnosticsBody.issues.map((issue) => issue.key),
+      ['DATABASE_URL'],
+    );
+    assert.ok(!JSON.stringify(diagnosticsBody).includes(admin.email));
     assert.equal(
       (await call({ ...runtime(db), DB: undefined }, 'reports')).status,
       503,
@@ -173,10 +187,36 @@ test('fails closed without config and rejects anonymous access', async () => {
     await sql.close();
   }
 });
+
+test('login initialization reports migration failures without disclosing database details', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  const failure = Object.assign(new Error('sensitive database detail'), {
+    code: '42P01',
+  });
+  const broken = new Database(
+    async () => {
+      throw failure;
+    },
+    async () => {
+      throw failure;
+    },
+  );
+  const response = await call(runtime(broken), 'auth/challenge');
+  assert.equal(response.status, 503);
+  const data = (await response.json()) as { error: string; code: string };
+  assert.equal(data.code, 'database_migration_required');
+  assert.ok(!JSON.stringify(data).includes('sensitive database detail'));
+  assert.equal(response.headers.has('set-cookie'), false);
+});
 test('Google allowlist, administrator bootstrap, secure cookie and session logout', async () => {
   const { db, sql } = await database();
   try {
-    const env = runtime(db);
+    const env = {
+      ...runtime(db),
+      APP_ORIGIN: origin + '/ ',
+      ADMIN_EMAIL: ' Owner@Gmail.com ',
+      GOOGLE_CLIENT_ID: ' client.apps.googleusercontent.com\n',
+    };
     assert.equal((await login(env, alice)).status, 403);
     const response = await login(env, admin);
     assert.equal(response.status, 200);
