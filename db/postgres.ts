@@ -1,5 +1,7 @@
 import postgres from 'postgres';
+import { rootCertificates } from 'node:tls';
 import { Database, type QueryRunner, type Row } from './database';
+import { SUPABASE_ROOT_CA } from './supabase-ca';
 
 export function connectionOptions(databaseUrl: string, ca?: string) {
   let url: URL;
@@ -16,6 +18,14 @@ export function connectionOptions(databaseUrl: string, ca?: string) {
   )
     throw new Error('DATABASE_URL must be a PostgreSQL connection string');
   const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  const supabaseHost =
+    url.hostname.endsWith('.pooler.supabase.com') ||
+    /^db\.[a-z0-9]+\.supabase\.co$/.test(url.hostname);
+  const trustedCa = ca?.trim()
+    ? ca.trim().replace(/\\n/g, '\n')
+    : supabaseHost
+      ? [...rootCertificates, SUPABASE_ROOT_CA]
+      : undefined;
   // Reject URL options that could override certificate verification.
   for (const option of ['sslmode', 'ssl', 'sslcert', 'sslkey', 'sslrootcert'])
     url.searchParams.delete(option);
@@ -31,7 +41,7 @@ export function connectionOptions(databaseUrl: string, ca?: string) {
         ? false
         : {
             rejectUnauthorized: true,
-            ...(ca ? { ca: ca.replace(/\\n/g, '\n') } : {}),
+            ...(trustedCa ? { ca: trustedCa } : {}),
           },
       connection: {
         application_name: 'weekly-report',

@@ -4,6 +4,8 @@ import { database } from './database';
 import { connectionOptions } from '../db/postgres';
 import { applyMigrations } from '../scripts/migrations';
 import type { Row } from '../db/database';
+import { SUPABASE_ROOT_CA } from '../db/supabase-ca';
+import { X509Certificate } from 'node:crypto';
 
 test('Supabase pooler connections disable prepared statements and verify remote TLS certificates', () => {
   const { url, options } = connectionOptions(
@@ -11,7 +13,32 @@ test('Supabase pooler connections disable prepared statements and verify remote 
   );
   assert.equal(new URL(url).searchParams.has('sslmode'), false);
   assert.equal(options.prepare, false);
-  assert.deepEqual(options.ssl, { rejectUnauthorized: true });
+  assert.ok(options.ssl && options.ssl.rejectUnauthorized);
+  assert.ok(
+    Array.isArray(options.ssl.ca) && options.ssl.ca.includes(SUPABASE_ROOT_CA),
+  );
+  const cert = new X509Certificate(SUPABASE_ROOT_CA);
+  assert.equal(cert.ca, true);
+  assert.equal(cert.verify(cert.publicKey), true);
+  assert.ok(Date.parse(cert.validTo) > Date.now());
+  assert.deepEqual(
+    connectionOptions('postgres://app:password@other.example.com:5432/postgres')
+      .options.ssl,
+    { rejectUnauthorized: true },
+  );
+  assert.deepEqual(
+    connectionOptions(
+      'postgres://app:password@region.pooler.supabase.com.evil.test:5432/postgres',
+    ).options.ssl,
+    { rejectUnauthorized: true },
+  );
+  assert.deepEqual(
+    connectionOptions(
+      'postgres://app:password@region.pooler.supabase.com:6543/postgres',
+      'custom\\ncertificate',
+    ).options.ssl,
+    { rejectUnauthorized: true, ca: 'custom\ncertificate' },
+  );
   assert.equal(
     connectionOptions('postgres://app:password@localhost:5432/postgres').options
       .ssl,

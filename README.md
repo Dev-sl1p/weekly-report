@@ -34,7 +34,7 @@ CREATE ROLE weekly_report_login
 DATABASE_URL=postgresql://weekly_report_login.PROJECT_REF:ENCODED_PASSWORD@POOLER_HOST:6543/postgres
 ```
 
-ชื่อ host ต้องคัดลอกจาก Supabase จริง รหัสผ่านที่มีอักขระพิเศษต้อง URL-encode ตัว driver ใช้ `prepare: false` สำหรับ transaction pooler และตรวจ TLS certificate หากต้องใช้ root certificate ของโปรเจกต์ ให้ใส่ PEM ใน `DATABASE_CA_CERT` โดยแทนการขึ้นบรรทัดด้วย `\n`
+ชื่อ host ต้องคัดลอกจาก Supabase จริง รหัสผ่านที่มีอักขระพิเศษต้อง URL-encode ตัว driver ใช้ `prepare: false` สำหรับ transaction pooler และตรวจ TLS certificate พร้อม hostname โค้ดรวม Supabase Root 2021 CA จากแหล่งทางการสำหรับโดเมน Supabase ไว้แล้ว หากโปรเจกต์ใช้ CA อื่น ให้ใส่ PEM ใน `DATABASE_CA_CERT` โดยแทนการขึ้นบรรทัดด้วย `\n` อ้างอิง [Supabase SSL](https://supabase.com/docs/guides/platform/ssl-enforcement)
 
 ใน Table Editor เลือก schema **weekly_report** เพื่อดูตาราง อย่าเพิ่ม schema นี้ใน **Data API → Exposed schemas**
 
