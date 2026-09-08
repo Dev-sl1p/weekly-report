@@ -19,7 +19,7 @@
 - สร้าง OAuth Client ชนิด **Web application** ใน Google Auth Platform
 - ตั้งชื่อแอป Weekly Report และกำหนด support email
 - ใช้ข้อมูลพื้นฐาน `openid`, `email`, `profile` เท่านั้น
-- เพิ่ม Authorized JavaScript origins: `http://localhost`, `http://localhost:3001` และ `https://team-weekly-report.savory-spool-5016.chatgpt.site`
+- เพิ่ม Authorized JavaScript origins: `http://localhost`, `http://localhost:3001` และ `https://team-weekly-report.jiratuzu.chatgpt.site`
 - ใช้ GIS JavaScript callback จึงไม่มีแอป OAuth callback route และไม่ใช้ client secret
 - ตั้ง homepage เป็น URL ของเว็บ และ privacy policy เป็น `/privacy` ของเว็บ กำหนด authorized domains / audience / test users ให้ตรงกับนโยบาย Google ของโปรเจกต์
 - หาก Google ขอการตรวจสอบโดเมนหรือยืนยันแอป ต้องดำเนินการใน Google Auth Platform ให้เสร็จก่อนเปิดให้ทีมใช้
@@ -90,5 +90,3 @@ npm run build
 - รอบนี้ยังทดสอบการเข้าสู่ระบบ Google จริงและ WebMCP ในบริบทที่เข้าสู่ระบบไม่ได้ เพราะยังไม่มี Google Client ID (ตั้งผู้ดูแลเริ่มต้นตามอีเมลเจ้าของ Site ที่เชื่อมต่อแล้ว)
 
 Dependencies ของ starter ถูกอัปเดตเฉพาะที่จำเป็นเพื่อแก้ช่องโหว่ระดับ high ที่ตรวจพบ เครื่องมือสร้าง migration ยังมี advisory ระดับ moderate ผ่าน esbuild เก่า; ไม่ถูกส่งไปเป็น Worker และงานนี้ไม่เปิด esbuild development server
-
-
